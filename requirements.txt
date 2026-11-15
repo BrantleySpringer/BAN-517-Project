@@ -1,0 +1,11 @@
+# Core mathematical engine, deterministic NLU agent, CLI mode, and unittest suite
+# run with Python 3.9+ standard library only.
+#
+# Install these packages for the web UI and pytest runner:
+streamlit>=1.32.0
+pytest>=7.4.0
+
+# Optional LLM providers for model identification / input extraction
+# (numerical calculations always execute in Python):
+# openai>=1.0.0
+# google-genai>=1.0.0
