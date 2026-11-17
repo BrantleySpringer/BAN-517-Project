@@ -669,9 +669,9 @@ def render_streamlit_app() -> None:
 
         tab_explain, tab_stages, tab_verify, tab_raw = st.tabs(
             [
-                "7. Explanation & Recommendation",
-                "2–5. Model, Inputs & Tool Details",
-                "6. Verification Audit",
+                "Explanation & Recommendation",
+                "Model, Inputs & Tool Details",
+                "Verification Audit",
                 "Full JSON Trace",
             ]
         )

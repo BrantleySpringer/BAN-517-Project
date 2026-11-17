@@ -1730,23 +1730,32 @@ def build_explanation(
             lines.append(
                 "- **Total Annual Cost (incl. Purchase):** *Not calculated (no unit purchase price provided)*"
             )
-        lines.extend(
-            [
-                "",
-                f"**Recommendation:** Order **{_fmt_num(q_exact)} units** per replenishment order to minimize total relevant inventory costs.",
-            ]
-        )
-        if q_whole is not None:
-            if _is_fractional_unit(q_exact):
-                lines.append(
-                    f"**Practical Whole-Unit Recommendation (if units are indivisible):** "
-                    f"Order **{q_whole:,} units** per replenishment order (rounded up from exact `{_fmt_num(q_exact)}` units)."
-                )
-            else:
-                lines.append(
-                    f"**Practical Whole-Unit Recommendation (if units are indivisible):** "
-                    f"Order **{q_whole:,} units** per replenishment order (exact whole-unit quantity)."
-                )
+        if q_whole is not None and _is_fractional_unit(q_exact):
+            lines.extend(
+                [
+                    "",
+                    f"**Recommendation:** The theoretical Economic Order Quantity (EOQ) is **{_fmt_num(q_exact)} units**, "
+                    f"which minimizes annual ordering and holding costs. If inventory must be ordered in whole units, "
+                    f"the practical operational recommendation is **{q_whole:,} units** per order.",
+                ]
+            )
+        elif q_whole is not None:
+            lines.extend(
+                [
+                    "",
+                    f"**Recommendation:** The theoretical Economic Order Quantity (EOQ) is **{q_whole:,} units** "
+                    f"(exact: `{_fmt_num(q_exact)}` units), which minimizes annual ordering and holding costs and is "
+                    f"already a whole-unit order quantity.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    f"**Recommendation:** The theoretical Economic Order Quantity (EOQ) is **{_fmt_num(q_exact)} units**, "
+                    f"which minimizes annual ordering and holding costs.",
+                ]
+            )
 
     elif m == "quantity_discount":
         q_exact = ans.get("optimal_order_quantity")
