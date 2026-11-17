@@ -694,8 +694,9 @@ def calculate_quantity_discount(
         "unconstrained_eoq": "Q_j = sqrt((2 * D * S) / H_j) where H_j is the tier-specific holding cost",
         "feasibility_rule": (
             "If min_qty_j <= Q_j <= max_qty_j -> candidate Q = Q_j (feasible in tier); "
-            "If Q_j < min_qty_j -> candidate Q = min_qty_j (round up to price-break threshold); "
-            "If Q_j > max_qty_j -> candidate Q is infeasible (dominated by a higher-volume tier)."
+            "If Q_j < min_qty_j -> evaluate the lower feasible boundary (candidate Q = min_qty_j); "
+            "If Q_j > max_qty_j -> evaluate the upper feasible boundary (candidate Q = max_qty_j); "
+            "compare Total Annual Cost across all feasible tier candidates to select Q*."
         ),
         "total_annual_cost": (
             "All-Units: TC(Q) = D * C_j + (D / Q) * S + (Q / 2) * H_j; "

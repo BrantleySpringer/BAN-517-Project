@@ -1519,6 +1519,27 @@ def _fmt_num(val: Optional[float], decimals: int = 2) -> str:
     return f"{val:,.{decimals}f}"
 
 
+def _ceil_units(val: Optional[float]) -> Optional[int]:
+    """Round up to the next whole unit for indivisible-unit operational recommendations.
+
+    Guards against floating-point representation noise (e.g. 500.00000000000006 -> 500).
+    """
+    if val is None:
+        return None
+    v = float(val)
+    if abs(v - round(v)) < 1e-9:
+        return int(round(v))
+    return int(math.ceil(v))
+
+
+def _is_fractional_unit(val: Optional[float]) -> bool:
+    """Return True when a positive inventory quantity has a non-negligible fractional component."""
+    if val is None:
+        return False
+    v = float(val)
+    return abs(v - round(v)) >= 1e-9
+
+
 def build_explanation(
     question: str,
     ident: ModelIdentification,
@@ -1560,7 +1581,7 @@ def build_explanation(
     var_defs = result.get("variable_definitions", {})
     if var_defs:
         for sym, defn in var_defs.items():
-            lines.append(f"- **{sym}:** {defn}")
+            lines.append(f"- **`{sym}`:** {defn}")
     else:
         lines.append("- Standard inventory decision variables applied.")
 
@@ -1583,9 +1604,9 @@ def build_explanation(
             if isinstance(s_val, list):
                 lines.append(f"- **{title}:**")
                 for item in s_val:
-                    lines.append(f"  - {item}")
+                    lines.append(f"  - `{item}`")
             else:
-                lines.append(f"- **{title}:** {s_val}")
+                lines.append(f"- **{title}:** `{s_val}`")
     else:
         lines.append("- Evaluated with extracted input parameters.")
 
@@ -1603,11 +1624,11 @@ def build_explanation(
         lines.extend(
             [
                 f"- **Holding Cost Basis:** `{inter.get('holding_cost_basis', 'N/A')}` (effective H = ${_fmt_num(inter.get('effective_holding_cost'), 4)}/unit/year)",
-                f"- **2 * D * S (Numerator):** {_fmt_num(inter.get('numerator_2DS'))}",
-                f"- **(2 * D * S) / H:** {_fmt_num(inter.get('ratio_2DS_over_H'))}",
-                f"- **Replenishment Orders per Year (D / Q*):** {_fmt_num(inter.get('orders_per_year'))} orders/year",
-                f"- **Order Cycle Time (Q* / D):** {cycle_detail}",
-                f"- **Average Cycle Inventory (Q* / 2):** {_fmt_num(inter.get('average_inventory'))} units",
+                f"- **Numerator (`2 * D * S`):** {_fmt_num(inter.get('numerator_2DS'))}",
+                f"- **Ratio (`(2 * D * S) / H`):** {_fmt_num(inter.get('ratio_2DS_over_H'))}",
+                f"- **Replenishment Orders per Year (`D / Q*`):** {_fmt_num(inter.get('orders_per_year'))} orders/year",
+                f"- **Order Cycle Time (`Q* / D`):** {cycle_detail}",
+                f"- **Average Cycle Inventory (`Q* / 2`):** {_fmt_num(inter.get('average_inventory'))} units",
                 f"- **Annual Ordering Cost:** ${_fmt_num(inter.get('annual_ordering_cost'))}",
                 f"- **Annual Holding Cost:** ${_fmt_num(inter.get('annual_holding_cost'))}",
             ]
@@ -1640,12 +1661,12 @@ def build_explanation(
         lines.extend(
             [
                 f"- **Variability Case:** `{inter.get('formula_case', 'N/A')}`",
-                f"- **Expected Lead-Time Demand (μ_LT = d * L):** {_fmt_num(inter.get('expected_lead_time_demand'))} units",
+                f"- **Expected Lead-Time Demand (`μ_LT = d * L`):** {_fmt_num(inter.get('expected_lead_time_demand'))} units",
                 f"- **Lead-Time Demand Variance:** {_fmt_num(inter.get('lead_time_demand_variance'), 4)}",
-                f"- **Lead-Time Demand Std Dev (σ_LT):** {_fmt_num(inter.get('lead_time_demand_std'), 4)} units",
-                f"- **Safety Factor (z):** {_fmt_num(inter.get('z_score'), 4) if inter.get('z_score') is not None else 'N/A (deterministic)'}",
+                f"- **Lead-Time Demand Std Dev (`σ_LT`):** {_fmt_num(inter.get('lead_time_demand_std'), 4)} units",
+                f"- **Safety Factor (`z`):** {_fmt_num(inter.get('z_score'), 4) if inter.get('z_score') is not None else 'N/A (deterministic)'}",
                 f"- **Cycle Service Level (CSL):** {_fmt_num((inter.get('cycle_service_level') or 0.0) * 100.0, 2)}%",
-                f"- **Stockout Risk (1 - CSL):** {_fmt_num((inter.get('stockout_probability') or 0.0) * 100.0, 2)}%",
+                f"- **Stockout Risk (`1 - CSL`):** {_fmt_num((inter.get('stockout_probability') or 0.0) * 100.0, 2)}%",
             ]
         )
         if inter.get("achieved_fill_rate") is not None:
@@ -1659,23 +1680,23 @@ def build_explanation(
         unit = result.get("time_unit", "period")
         lines.extend(
             [
-                f"- **Protection Interval (T + L):** {_fmt_num(inter.get('protection_period'), 2)} {unit}(s)",
-                f"- **Expected Protection Period Demand (μ_(T+L)):** {_fmt_num(inter.get('expected_protection_demand'))} units",
-                f"- **Protection Period Std Dev (σ_(T+L)):** {_fmt_num(inter.get('protection_demand_std'), 4) if inter.get('protection_demand_std') is not None else 'N/A (explicit fixed safety stock)'}",
-                f"- **Safety Factor (z):** {_fmt_num(inter.get('z_score'), 4) if inter.get('z_score') is not None else 'N/A'}",
+                f"- **Protection Interval (`T + L`):** {_fmt_num(inter.get('protection_period'), 2)} {unit}(s)",
+                f"- **Expected Protection Period Demand (`μ_(T+L)`):** {_fmt_num(inter.get('expected_protection_demand'))} units",
+                f"- **Protection Period Std Dev (`σ_(T+L)`):** {_fmt_num(inter.get('protection_demand_std'), 4) if inter.get('protection_demand_std') is not None else 'N/A (explicit fixed safety stock)'}",
+                f"- **Safety Factor (`z`):** {_fmt_num(inter.get('z_score'), 4) if inter.get('z_score') is not None else 'N/A'}",
                 f"- **Cycle Service Level:** {_fmt_num((inter.get('cycle_service_level') or 0.0) * 100.0, 2) if inter.get('cycle_service_level') is not None else 'N/A'}%",
-                f"- **Evaluated Inventory Position (IP):** {_fmt_num(inter.get('inventory_position')) if inter.get('inventory_position') is not None else 'N/A'} units",
-                f"- **Average Cycle Inventory (d * T / 2):** {_fmt_num(inter.get('average_cycle_inventory'))} units",
-                f"- **Expected Average Inventory (d * T / 2 + SS):** {_fmt_num(inter.get('expected_average_inventory'))} units",
+                f"- **Evaluated Inventory Position (`IP`):** {_fmt_num(inter.get('inventory_position')) if inter.get('inventory_position') is not None else 'N/A'} units",
+                f"- **Average Cycle Inventory (`d * T / 2`):** {_fmt_num(inter.get('average_cycle_inventory'))} units",
+                f"- **Expected Average Inventory (`d * T / 2 + SS`):** {_fmt_num(inter.get('expected_average_inventory'))} units",
             ]
         )
 
     elif m == "newsvendor":
         lines.extend(
             [
-                f"- **Underage Cost (Cu):** ${_fmt_num(inter.get('underage_cost'))}/unit",
-                f"- **Overage Cost (Co):** ${_fmt_num(inter.get('overage_cost'))}/unit",
-                f"- **Critical Ratio (Cu / (Cu + Co)):** {_fmt_num((inter.get('critical_ratio') or 0.0) * 100.0, 2)}% ({inter.get('critical_ratio', 0.0):.4f})",
+                f"- **Underage Cost (`Cu`):** ${_fmt_num(inter.get('underage_cost'))}/unit",
+                f"- **Overage Cost (`Co`):** ${_fmt_num(inter.get('overage_cost'))}/unit",
+                f"- **Critical Ratio (`Cu / (Cu + Co)`):** {_fmt_num((inter.get('critical_ratio') or 0.0) * 100.0, 2)}% ({inter.get('critical_ratio', 0.0):.4f})",
                 f"- **In-Stock Probability:** {_fmt_num((inter.get('in_stock_probability') or 0.0) * 100.0, 2)}%",
                 f"- **Volumetric Fill Rate:** {_fmt_num((inter.get('fill_rate') or 0.0) * 100.0, 2)}%",
                 f"- **Expected Sales:** {_fmt_num(inter.get('expected_sales'))} units",
@@ -1693,73 +1714,174 @@ def build_explanation(
     ans = result.get("final_answer", {})
 
     if m == "eoq":
+        q_exact = ans.get("optimal_order_quantity")
+        q_whole = _ceil_units(q_exact)
         lines.extend(
             [
-                f"- **Optimal Order Quantity (EOQ / Q*):** **{_fmt_num(ans.get('optimal_order_quantity'))} units**",
-                f"- **Total Relevant Inventory Cost:** **${_fmt_num(ans.get('total_relevant_cost'))}/year**",
+                f"- **Optimal Order Quantity (EOQ / `Q*`):** **{_fmt_num(q_exact)} units**",
+                f"- **Total Relevant Inventory Cost (Ordering + Holding):** **${_fmt_num(ans.get('total_relevant_cost'))}/year**",
             ]
         )
-        if ans.get("total_annual_cost") is not None:
-            lines.append(f"- **Total Annual Cost (incl. Purchase):** **${_fmt_num(ans.get('total_annual_cost'))}/year**")
+        if inter.get("annual_purchase_cost") is not None and ans.get("total_annual_cost") is not None:
+            lines.append(
+                f"- **Total Annual Cost (incl. Purchase):** **${_fmt_num(ans.get('total_annual_cost'))}/year**"
+            )
+        else:
+            lines.append(
+                "- **Total Annual Cost (incl. Purchase):** *Not calculated (no unit purchase price provided)*"
+            )
         lines.extend(
             [
                 "",
-                f"**Recommendation:** Order **{_fmt_num(ans.get('optimal_order_quantity'))} units** "
-                f"(~{round(ans.get('optimal_order_quantity') or 0):,} units) per replenishment order to minimize total relevant inventory costs.",
+                f"**Recommendation:** Order **{_fmt_num(q_exact)} units** per replenishment order to minimize total relevant inventory costs.",
             ]
         )
+        if q_whole is not None:
+            if _is_fractional_unit(q_exact):
+                lines.append(
+                    f"**Practical Whole-Unit Recommendation (if units are indivisible):** "
+                    f"Order **{q_whole:,} units** per replenishment order (rounded up from exact `{_fmt_num(q_exact)}` units)."
+                )
+            else:
+                lines.append(
+                    f"**Practical Whole-Unit Recommendation (if units are indivisible):** "
+                    f"Order **{q_whole:,} units** per replenishment order (exact whole-unit quantity)."
+                )
 
     elif m == "quantity_discount":
+        q_exact = ans.get("optimal_order_quantity")
+        q_whole = _ceil_units(q_exact)
+        # Ensure rounded-up recommendation stays within the winning tier's feasible upper bound if finite
+        win_tier_idx = ans.get("optimal_tier")
+        tier_rows = inter.get("tier_evaluations") or result.get("tier_evaluations") or []
+        win_tier = next((t for t in tier_rows if t.get("tier_index") == win_tier_idx), None)
+        if q_whole is not None and win_tier is not None and win_tier.get("max_qty") is not None:
+            max_bound = float(win_tier["max_qty"])
+            if win_tier.get("max_exclusive"):
+                max_bound = max_bound - 1.0
+            if q_whole > max_bound:
+                q_whole = int(math.floor(max_bound))
+
         lines.extend(
             [
-                f"- **Optimal Order Quantity (Q*):** **{_fmt_num(ans.get('optimal_order_quantity'))} units**",
-                f"- **Winning Price Tier:** **Tier {ans.get('optimal_tier')}** (@ ${_fmt_num(ans.get('optimal_unit_price'))}/unit)",
+                f"- **Optimal Order Quantity (`Q*`):** **{_fmt_num(q_exact)} units**",
+                f"- **Winning Price Tier:** **Tier {win_tier_idx}** (@ ${_fmt_num(ans.get('optimal_unit_price'))}/unit)",
                 f"- **Minimum Total Annual Cost:** **${_fmt_num(ans.get('total_annual_cost'))}/year**",
                 "",
-                f"**Recommendation:** Order **{_fmt_num(ans.get('optimal_order_quantity'))} units** from Tier {ans.get('optimal_tier')} "
+                f"**Recommendation:** Order **{_fmt_num(q_exact)} units** from Tier {win_tier_idx} "
                 f"to achieve the lowest total annual cost of **${_fmt_num(ans.get('total_annual_cost'))}/year**.",
             ]
         )
+        if q_whole is not None:
+            if _is_fractional_unit(q_exact):
+                lines.append(
+                    f"**Practical Whole-Unit Recommendation (if units are indivisible):** "
+                    f"Order **{q_whole:,} units** from Tier {win_tier_idx} (rounded up from exact `{_fmt_num(q_exact)}` units within the feasible tier range)."
+                )
+            else:
+                lines.append(
+                    f"**Practical Whole-Unit Recommendation (if units are indivisible):** "
+                    f"Order **{q_whole:,} units** from Tier {win_tier_idx} (exact whole-unit quantity)."
+                )
 
     elif m == "safety_stock_rop":
+        ss_exact = ans.get("safety_stock")
+        rop_exact = ans.get("reorder_point")
+        ss_whole = _ceil_units(ss_exact)
+        rop_whole = _ceil_units(rop_exact)
         lines.extend(
             [
-                f"- **Safety Stock (SS):** **{_fmt_num(ans.get('safety_stock'))} units**",
-                f"- **Reorder Point (ROP):** **{_fmt_num(ans.get('reorder_point'))} units**",
+                f"- **Safety Stock (`SS`):** **{_fmt_num(ss_exact)} units**",
+                f"- **Reorder Point (`ROP`):** **{_fmt_num(rop_exact)} units**",
                 "",
-                f"**Recommendation:** Maintain **{_fmt_num(ans.get('safety_stock'))} units** of safety stock "
-                f"and place a replenishment order whenever inventory drops to **{_fmt_num(ans.get('reorder_point'))} units**.",
+                f"**Recommendation:** Maintain **{_fmt_num(ss_exact)} units** of safety stock "
+                f"and place a replenishment order whenever inventory drops to **{_fmt_num(rop_exact)} units**.",
             ]
         )
+        if ss_whole is not None and rop_whole is not None:
+            if _is_fractional_unit(ss_exact) or _is_fractional_unit(rop_exact):
+                lines.append(
+                    f"**Practical Whole-Unit Operational Recommendation (if units are indivisible):** "
+                    f"Maintain **{ss_whole:,} units** of safety stock (rounded up from `{_fmt_num(ss_exact)}`) "
+                    f"and set the reorder point to **{rop_whole:,} units** (rounded up from `{_fmt_num(rop_exact)}`) "
+                    f"to preserve the target cycle service level."
+                )
+            else:
+                lines.append(
+                    f"**Practical Whole-Unit Operational Recommendation (if units are indivisible):** "
+                    f"Maintain **{ss_whole:,} units** of safety stock and set the reorder point to **{rop_whole:,} units** "
+                    f"(exact whole-unit quantities)."
+                )
 
     elif m == "fixed_period_review":
+        ss_exact = ans.get("safety_stock")
+        target_exact = ans.get("target_inventory_level")
+        order_exact = ans.get("order_quantity")
+        ss_whole = _ceil_units(ss_exact)
+        target_whole = _ceil_units(target_exact)
+        order_whole = _ceil_units(order_exact)
+
         lines.extend(
             [
-                f"- **Safety Stock (SS):** **{_fmt_num(ans.get('safety_stock'))} units**",
-                f"- **Order-Up-To Target Inventory Level (S):** **{_fmt_num(ans.get('target_inventory_level'))} units**",
+                f"- **Safety Stock (`SS`):** **{_fmt_num(ss_exact)} units**",
+                f"- **Order-Up-To Target Inventory Level (`S`):** **{_fmt_num(target_exact)} units**",
             ]
         )
-        if ans.get("order_quantity") is not None:
+        if order_exact is not None:
             lines.append(
-                f"- **Order Quantity to Place Now (Q):** **{_fmt_num(ans.get('order_quantity'))} units**"
+                f"- **Order Quantity to Place Now (`Q`):** **{_fmt_num(order_exact)} units**"
             )
             rec = (
-                f"Set order-up-to level to **{_fmt_num(ans.get('target_inventory_level'))} units** (including "
-                f"**{_fmt_num(ans.get('safety_stock'))} units** safety stock) and place an order for "
-                f"**{_fmt_num(ans.get('order_quantity'))} units** immediately."
+                f"Set order-up-to level to **{_fmt_num(target_exact)} units** (including "
+                f"**{_fmt_num(ss_exact)} units** safety stock) and place an order for "
+                f"**{_fmt_num(order_exact)} units** immediately."
             )
+            any_frac = (
+                _is_fractional_unit(ss_exact)
+                or _is_fractional_unit(target_exact)
+                or _is_fractional_unit(order_exact)
+            )
+            if any_frac:
+                whole_rec = (
+                    f"**Practical Whole-Unit Operational Recommendation (if units are indivisible):** "
+                    f"Maintain **{ss_whole:,} units** of safety stock (rounded up from `{_fmt_num(ss_exact)}`), "
+                    f"set the order-up-to target level to **{target_whole:,} units** (rounded up from `{_fmt_num(target_exact)}`), "
+                    f"and place an order for **{order_whole:,} units** (rounded up from `{_fmt_num(order_exact)}`) "
+                    f"to meet or exceed the target service level."
+                )
+            else:
+                whole_rec = (
+                    f"**Practical Whole-Unit Operational Recommendation (if units are indivisible):** "
+                    f"Maintain **{ss_whole:,} units** of safety stock, set the order-up-to target level to "
+                    f"**{target_whole:,} units**, and place an order for **{order_whole:,} units** "
+                    f"(exact whole-unit quantities)."
+                )
         else:
             rec = (
-                f"Set order-up-to target level to **{_fmt_num(ans.get('target_inventory_level'))} units** "
-                f"(including **{_fmt_num(ans.get('safety_stock'))} units** safety stock)."
+                f"Set order-up-to target level to **{_fmt_num(target_exact)} units** "
+                f"(including **{_fmt_num(ss_exact)} units** safety stock)."
             )
-        lines.extend(["", f"**Recommendation:** {rec}"])
+            any_frac = _is_fractional_unit(ss_exact) or _is_fractional_unit(target_exact)
+            if any_frac:
+                whole_rec = (
+                    f"**Practical Whole-Unit Operational Recommendation (if units are indivisible):** "
+                    f"Maintain **{ss_whole:,} units** of safety stock (rounded up from `{_fmt_num(ss_exact)}`) "
+                    f"and set the order-up-to target level to **{target_whole:,} units** (rounded up from `{_fmt_num(target_exact)}`) "
+                    f"to meet or exceed the target service level."
+                )
+            else:
+                whole_rec = (
+                    f"**Practical Whole-Unit Operational Recommendation (if units are indivisible):** "
+                    f"Maintain **{ss_whole:,} units** of safety stock and set the order-up-to target level to "
+                    f"**{target_whole:,} units** (exact whole-unit quantities)."
+                )
+        lines.extend(["", f"**Recommendation:** {rec}", whole_rec])
 
     elif m == "newsvendor":
         lines.extend(
             [
                 f"- **Critical Ratio:** **{ans.get('critical_ratio', 0.0):.4f}** ({_fmt_num((ans.get('critical_ratio') or 0.0) * 100.0, 2)}%)",
-                f"- **Recommended Order Quantity (Q*):** **{_fmt_num(ans.get('recommended_order_quantity'))} units** "
+                f"- **Recommended Order Quantity (`Q*`):** **{_fmt_num(ans.get('recommended_order_quantity'))} units** "
                 f"(nearest integer: {ans.get('rounded_order_quantity', 0):,} units)",
             ]
         )
@@ -1776,10 +1898,10 @@ def build_explanation(
     # --- 7. Verification Checks ---
     v_passed = result.get("verification_passed", verification.passed)
     v_checks = result.get("verification_checks") or verification.checks
-    lines.extend(["", f"### 7. Verification Checks", f"**Status:** {'PASSED' if v_passed else 'FAILED'}"])
+    lines.extend(["", "### 7. Verification Checks", f"**Status:** {'PASSED' if v_passed else 'FAILED'}"])
     for chk in v_checks:
         badge = "PASS" if chk.get("passed") else "FAIL"
-        lines.append(f"- [{badge}] **{chk.get('name')}:** {chk.get('detail')}")
+        lines.append(f"- [{badge}] **{chk.get('name')}:** `{chk.get('detail')}`")
 
     # --- 8. Assumptions ---
     lines.extend(["", "### 8. Assumptions"])
