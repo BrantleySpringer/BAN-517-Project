@@ -246,18 +246,8 @@ def _parse_rate_or_prob(val_str: str, has_pct: bool) -> float:
 # ---------------------------------------------------------------------------
 
 def _count_price_break_tiers(text: str) -> int:
-    range_matches = re.findall(
-        r"(?:\d[\d,]*\s*(?:-|to|–)\s*\d[\d,]*|\d[\d,]*\s*\+|\d[\d,]*\s+or\s+more|under\s+\d[\d,]*|less\s+than\s+\d[\d,]*|<\s*\d[\d,]*|>=\s*\d[\d,]*)"
-        r"[^.;\n]{0,45}?\$\s*\d[\d,]*(?:\.\d+)?",
-        text,
-        re.IGNORECASE,
-    )
-    discount_pct_matches = re.findall(
-        r"\d[\d,]*(?:\s*\+|\s+or\s+more)[^.;\n]{0,40}?\d+(?:\.\d+)?\s*%\s*discount",
-        text,
-        re.IGNORECASE,
-    )
-    return max(len(range_matches), len(discount_pct_matches))
+    """Count quantity-based unit-price tiers using the unified tier extractor."""
+    return len(_extract_quantity_discount_tiers(text))
 
 
 def identify_model_rule_based(question: str) -> ModelIdentification:
@@ -306,14 +296,14 @@ def identify_model_rule_based(question: str) -> ModelIdentification:
         if re.search(pat, ql):
             add("quantity_discount", wt, label)
     if tier_count >= 2:
-        add("quantity_discount", 5.5, f"detected {tier_count} price-break tiers")
-        add("eoq", -2.5, "penalized due to multiple price tiers")
+        add("quantity_discount", 7.5, f"detected {tier_count} quantity-based price tiers")
+        add("eoq", -3.5, "penalized due to multiple quantity-based price tiers")
     elif tier_count == 1 and re.search(
         r"discount|quantity\s+break|price\s+break|base\s+(?:unit\s+)?(?:purchase\s+)?(?:cost|price)",
         ql,
     ):
-        add("quantity_discount", 3.5, "discount break tier detected")
-        add("eoq", -2.0, "penalized due to price-break tier")
+        add("quantity_discount", 4.5, "discount break tier detected")
+        add("eoq", -2.5, "penalized due to price-break tier")
 
     # --- 3. Safety Stock & Reorder Point ---
     for pat, label, wt in [
@@ -549,14 +539,111 @@ def _extract_annual_demand_and_costs(
 
 
 def _extract_quantity_discount_tiers(text: str) -> List[Dict[str, Any]]:
-    """Parse price-break tiers from varied natural-language tier descriptions."""
+    """Parse price-break tiers from varied natural-language tier descriptions.
+
+    Supports both price-first syntax (e.g., "$12 per unit for orders below 500 units,
+    $11.50 for 500-999 units, and $11 for orders of 1,000 units or more") and
+    quantity-first syntax (e.g., "1-499 units at $12, 500-999 units at $11.50, 1000+ at $11").
+    """
     tiers: List[Dict[str, Any]] = []
     seen_spans: List[Tuple[int, int]] = []
 
     def overlaps(s: int, e: int) -> bool:
         return any(not (e <= a or s >= b) for a, b in seen_spans)
 
-    # 1. Range: "1-499 units: $12.00" or "200 to 599, price is $28"
+    def make_lower_tier(bound: float, is_exclusive: bool, price: float) -> Dict[str, Any]:
+        if is_exclusive:
+            if bound > 1.0 and bound.is_integer():
+                return {
+                    "min_qty": 1.0,
+                    "max_qty": bound - 1.0,
+                    "max_exclusive": False,
+                    "unit_price": price,
+                }
+            return {
+                "min_qty": 0.0,
+                "max_qty": bound,
+                "max_exclusive": True,
+                "unit_price": price,
+            }
+        return {
+            "min_qty": 1.0 if bound >= 1.0 else 0.0,
+            "max_qty": bound,
+            "max_exclusive": False,
+            "unit_price": price,
+        }
+
+    # --- 0. Price-first patterns (matched first so adjacent tiers never cross-pair) ---
+    price_prefix = (
+        r"\$\s*([\d,]+(?:\.\d+)?)\s*"
+        r"(?:(?:per\s+(?:unit|item)|/unit|/item|each)\s+)?"
+        r"(?:for|on|when\s+ordering|if\s+ordering)\s+"
+        r"(?:orders?\s+(?:of\s+)?)?"
+    )
+
+    # 0A. Price-first Range: "$11.50 for 500-999 units" / "$11.50 per unit for orders of 500 to 999 units"
+    for m in re.finditer(
+        price_prefix + r"(?:between\s+)?([\d,]+)\s*(?:-|to|–|and)\s*([\d,]+)\s*(?:units?|items?)?",
+        text,
+        re.IGNORECASE,
+    ):
+        if overlaps(m.start(), m.end()):
+            continue
+        seen_spans.append((m.start(), m.end()))
+        tiers.append(
+            {
+                "min_qty": _to_float(m.group(2)),
+                "max_qty": _to_float(m.group(3)),
+                "max_exclusive": False,
+                "unit_price": _to_float(m.group(1)),
+            }
+        )
+
+    # 0B. Price-first Lower Open-Ended: "$12 per unit for orders below 500 units" / "$12 for under 500" / "$12 for up to 499"
+    for m in re.finditer(
+        price_prefix
+        + r"(?:(under|less\s+than|fewer\s+than|below|<)|(up\s+to|<=))\s*([\d,]+)\s*(?:units?|items?)?",
+        text,
+        re.IGNORECASE,
+    ):
+        if overlaps(m.start(), m.end()):
+            continue
+        seen_spans.append((m.start(), m.end()))
+        tiers.append(
+            make_lower_tier(
+                bound=_to_float(m.group(4)),
+                is_exclusive=bool(m.group(2)),
+                price=_to_float(m.group(1)),
+            )
+        )
+
+    # 0C. Price-first Upper Open-Ended: "$11 for orders of 1,000 units or more" / "$11 per unit for 1,000+ units"
+    for m in re.finditer(
+        price_prefix
+        + r"(?:(>=|at\s+least|over|above|more\s+than)\s*([\d,]+)\s*(?:units?|items?)?"
+        + r"|([\d,]+)\s*(?:units?|items?)?\s*(?:\+|\s+or\s+more|\s+and\s+above|\s+or\s+above|\s+and\s+up|\s+or\s+higher))",
+        text,
+        re.IGNORECASE,
+    ):
+        if overlaps(m.start(), m.end()):
+            continue
+        seen_spans.append((m.start(), m.end()))
+        if m.group(2):
+            min_q = _to_float(m.group(3))
+            if re.search(r"\b(?:over|above|more\s+than)\b", m.group(2), re.IGNORECASE):
+                min_q += 1.0
+        else:
+            min_q = _to_float(m.group(4))
+        tiers.append(
+            {
+                "min_qty": min_q,
+                "max_qty": None,
+                "max_exclusive": False,
+                "unit_price": _to_float(m.group(1)),
+            }
+        )
+
+    # --- 1. Quantity-first Range: "1-499 units: $12.00" or "200 to 599, price is $28" ---
     for m in re.finditer(
         r"(?<!\d)([\d,]+)\s*(?:-|to|–)\s*([\d,]+)\s*(?:units?|items?)?[^.;\n$\d]{0,40}?\$\s*([\d,]+(?:\.\d+)?)",
         text,
@@ -574,41 +661,39 @@ def _extract_quantity_discount_tiers(text: str) -> List[Dict[str, Any]]:
             }
         )
 
-    # 2. Lower open-ended: "under 200 units = $30" / "less than 500: $20" / "< 100: $50" / "up to 499: $20"
+    # --- 2. Quantity-first Lower Open-Ended: "under 200 units = $30" / "below 500: $12" / "up to 499: $20" ---
     for m in re.finditer(
-        r"(?:(under|less\s+than|below|<)|(up\s+to|<=))\s*([\d,]+)\s*(?:units?|items?)?[^.;\n$\d]{0,40}?\$\s*([\d,]+(?:\.\d+)?)",
+        r"(?:(under|less\s+than|fewer\s+than|below|<)|(up\s+to|<=))\s*([\d,]+)\s*(?:units?|items?)?[^.;\n$\d]{0,40}?\$\s*([\d,]+(?:\.\d+)?)",
         text,
         re.IGNORECASE,
     ):
         if overlaps(m.start(), m.end()):
             continue
         seen_spans.append((m.start(), m.end()))
-        is_exclusive = bool(m.group(1))
         tiers.append(
-            {
-                "min_qty": 0.0,
-                "max_qty": _to_float(m.group(3)),
-                "max_exclusive": is_exclusive,
-                "unit_price": _to_float(m.group(4)),
-            }
+            make_lower_tier(
+                bound=_to_float(m.group(3)),
+                is_exclusive=bool(m.group(1)),
+                price=_to_float(m.group(4)),
+            )
         )
 
-    # 3. Upper open-ended: "1000+: $11.00" / "600 or more = $26" / "500 units or more cost $18"
+    # --- 3. Quantity-first Upper Open-Ended: "1000+: $11.00" / "600 or more = $26" / "500 units or more cost $18" ---
     for m in re.finditer(
-        r"(?<![\d.$])(?:(>=|at\s+least|over|above)?\s*([\d,]+)\s*(?:units?|items?)?\s*(?:\+|\s+or\s+more|\s+and\s+above|\s+or\s+above)?)\s*(?:units?|items?)?[^.;\n$\d]{0,40}?\$\s*([\d,]+(?:\.\d+)?)",
+        r"(?<![\d.$])(?:(>=|at\s+least|over|above|more\s+than)?\s*([\d,]+)\s*(?:units?|items?)?\s*(?:\+|\s+or\s+more|\s+and\s+above|\s+or\s+above|\s+and\s+up|\s+or\s+higher)?)\s*(?:units?|items?)?[^.;\n$\d]{0,40}?\$\s*([\d,]+(?:\.\d+)?)",
         text,
         re.IGNORECASE,
     ):
         matched_chunk = m.group(0)
         has_marker = bool(
             m.group(1)
-            or re.search(r"\+|or\s+more|and\s+above|or\s+above", matched_chunk, re.IGNORECASE)
+            or re.search(r"\+|or\s+more|and\s+above|or\s+above|and\s+up|or\s+higher", matched_chunk, re.IGNORECASE)
         )
         if not has_marker or overlaps(m.start(), m.end()):
             continue
         seen_spans.append((m.start(), m.end()))
         min_q = _to_float(m.group(2))
-        if re.search(r"\b(?:over|above)\b", matched_chunk, re.IGNORECASE) and not re.search(
+        if re.search(r"\b(?:over|above|more\s+than)\b", matched_chunk, re.IGNORECASE) and not re.search(
             r"or\s+above|and\s+above", matched_chunk, re.IGNORECASE
         ):
             min_q += 1.0

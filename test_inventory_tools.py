@@ -1557,6 +1557,62 @@ class TestStreamlitCsvIntegration(unittest.TestCase):
         self.assertAlmostEqual(resp_5day.extraction.params["demand_std"], 8.0 * math.sqrt(5.0), places=10)
         self.assertTrue(any("5 operating days per week" in a for a in resp_5day.extraction.assumptions))
 
+    def test_quantity_discount_price_first_natural_language_and_test8(self) -> None:
+        agent = InventoryDecisionAgent(parser_mode="rule")
+
+        # 1. Exact BAN 517 Test 8 question (price-first natural-language tiers, no explicit "quantity discount" phrase)
+        q_test8 = (
+            "Annual demand is 5,000 units. Ordering cost is $60 per order and annual holding cost is "
+            "20% of unit cost. The supplier charges $12 per unit for orders below 500 units, "
+            "$11.50 for 500-999 units, and $11 for orders of 1,000 units or more. "
+            "Find the best order quantity and annual cost."
+        )
+        resp = agent.run(q_test8)
+        self.assertEqual(resp.status, "completed")
+        self.assertEqual(resp.identification.model_id, "quantity_discount")
+        self.assertEqual(resp.tool_selection.tool_name, "calculate_quantity_discount")
+        self.assertTrue(resp.verification.passed)
+
+        # Verify extracted inputs & 3 price tiers
+        params = resp.extraction.params
+        self.assertAlmostEqual(params["annual_demand"], 5000.0, places=8)
+        self.assertAlmostEqual(params["ordering_cost"], 60.0, places=8)
+        self.assertAlmostEqual(params["holding_rate"], 0.20, places=8)
+        self.assertEqual(params["discount_type"], "all_units")
+        self.assertEqual(len(params["tiers"]), 3)
+        self.assertEqual(
+            [(t["min_qty"], t["max_qty"], t["unit_price"]) for t in params["tiers"]],
+            [(1.0, 499.0, 12.0), (500.0, 999.0, 11.5), (1000.0, None, 11.0)],
+        )
+
+        # Verify exact optimal result and cost breakdown
+        calc = resp.calculation
+        self.assertEqual(calc["optimal_tier"], 3)
+        self.assertAlmostEqual(calc["optimal_order_quantity"], 1000.0, places=8)
+        self.assertAlmostEqual(calc["optimal_unit_price"], 11.0, places=8)
+        self.assertAlmostEqual(calc["annual_purchase_cost"], 55000.0, places=6)
+        self.assertAlmostEqual(calc["annual_ordering_cost"], 300.0, places=6)
+        self.assertAlmostEqual(calc["annual_holding_cost"], 1100.0, places=6)
+        self.assertAlmostEqual(calc["total_annual_cost"], 56400.0, places=6)
+
+        # Verify all 3 tiers were evaluated and compared
+        tiers_eval = calc["tier_evaluations"]
+        self.assertEqual(len(tiers_eval), 3)
+        self.assertAlmostEqual(tiers_eval[0]["candidate_quantity"], 499.0, places=6)
+        self.assertAlmostEqual(tiers_eval[1]["candidate_quantity"], math.sqrt(2 * 5000 * 60 / 2.3), places=6)
+        self.assertAlmostEqual(tiers_eval[2]["candidate_quantity"], 1000.0, places=6)
+
+        # 2. Price-first tiers STILL select Quantity Discount even if question explicitly mentions "EOQ"
+        q_with_eoq = (
+            "Find the EOQ when annual demand is 5,000 units, ordering cost is $60, holding cost is "
+            "20% of unit cost, and supplier charges $12 per unit for orders below 500 units, "
+            "$11.50 for 500-999 units, and $11 for orders of 1,000 units or more."
+        )
+        resp_eoq_mention = agent.run(q_with_eoq)
+        self.assertEqual(resp_eoq_mention.status, "completed")
+        self.assertEqual(resp_eoq_mention.identification.model_id, "quantity_discount")
+        self.assertAlmostEqual(resp_eoq_mention.calculation["total_annual_cost"], 56400.0, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
