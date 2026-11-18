@@ -143,17 +143,40 @@ def _periods_per_year(unit: str, working_days_per_year: float = 365.0) -> float:
     return 1.0
 
 
+def _period_conversion_ratio(
+    from_unit: str,
+    to_unit: str,
+    working_days_per_year: float = 365.0,
+    days_per_week: float = 7.0,
+) -> float:
+    """Return the number of `from_unit` periods contained in one `to_unit` period.
+
+    Uses exact `days_per_week` (default: 7 calendar days per week) for daily <-> weekly
+    conversions rather than `365 / 52`, preserving exact dimensional consistency.
+    """
+    if from_unit == to_unit:
+        return 1.0
+    if from_unit == "day" and to_unit == "week":
+        return days_per_week
+    if from_unit == "week" and to_unit == "day":
+        return 1.0 / days_per_week
+    return _periods_per_year(from_unit, working_days_per_year) / _periods_per_year(
+        to_unit, working_days_per_year
+    )
+
+
 def _convert_time_length(
     value: float,
     from_unit: str,
     to_unit: str,
     working_days_per_year: float = 365.0,
+    days_per_week: float = 7.0,
 ) -> float:
     if from_unit == to_unit:
         return value
     days_map = {
         "day": 1.0,
-        "week": 7.0,
+        "week": days_per_week,
         "month": working_days_per_year / 12.0,
         "year": working_days_per_year,
     }
@@ -166,11 +189,12 @@ def _convert_demand_rate(
     from_unit: str,
     to_unit: str,
     working_days_per_year: float = 365.0,
+    days_per_week: float = 7.0,
 ) -> float:
     if from_unit == to_unit:
         return mean_val
-    annual = mean_val * _periods_per_year(from_unit, working_days_per_year)
-    return annual / _periods_per_year(to_unit, working_days_per_year)
+    ratio = _period_conversion_ratio(from_unit, to_unit, working_days_per_year, days_per_week)
+    return mean_val * ratio
 
 
 def _convert_demand_std(
@@ -178,13 +202,12 @@ def _convert_demand_std(
     from_unit: str,
     to_unit: str,
     working_days_per_year: float = 365.0,
+    days_per_week: float = 7.0,
 ) -> float:
-    """Convert independent-period demand std dev via variance scaling."""
+    """Convert independent-period demand std dev via square-root time scaling."""
     if from_unit == to_unit:
         return std_val
-    ratio = _periods_per_year(from_unit, working_days_per_year) / _periods_per_year(
-        to_unit, working_days_per_year
-    )
+    ratio = _period_conversion_ratio(from_unit, to_unit, working_days_per_year, days_per_week)
     return std_val * math.sqrt(ratio)
 
 
@@ -197,6 +220,18 @@ def _extract_working_days(text: str) -> float:
     if m:
         return float(m.group(1))
     return 365.0
+
+
+def _extract_days_per_week(text: str) -> Tuple[float, bool]:
+    """Extract an explicit operating-days-per-week convention; default to 7 calendar days/week."""
+    m = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:working|operating|business|calendar)?\s*days\s*(?:per|a|in\s+a|/)\s*week",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return float(m.group(1)), True
+    return 7.0, False
 
 
 def _parse_rate_or_prob(val_str: str, has_pct: bool) -> float:
@@ -686,10 +721,13 @@ def _extract_demand_and_lead_time_stats(
     text: str,
     conversions: List[str],
     raw_matches: Dict[str, Any],
+    assumptions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Extract demand mean/std, lead time (+ std), and align time units cleanly."""
     out: Dict[str, Any] = {}
     working_days = _extract_working_days(text)
+    days_per_week, explicit_days_per_week = _extract_days_per_week(text)
+    used_day_week_conversion = False
 
     # Check direct lead-time demand distribution first
     direct_lt = re.search(
@@ -813,37 +851,78 @@ def _extract_demand_and_lead_time_stats(
 
     if lt_val is not None:
         if base_unit != "period" and lt_unit and lt_unit != base_unit:
-            lt_conv = _convert_time_length(lt_val, lt_unit, base_unit, working_days)
-            conversions.append(f"Converted lead time {lt_val:g} {lt_unit}(s) -> {lt_conv:g} {base_unit}(s)")
+            lt_conv = _convert_time_length(lt_val, lt_unit, base_unit, working_days, days_per_week)
+            if {lt_unit, base_unit} == {"day", "week"}:
+                used_day_week_conversion = True
+                conversions.append(
+                    f"Converted lead time {lt_val:g} {lt_unit}(s) -> {lt_conv:g} {base_unit}(s) "
+                    f"(using {days_per_week:g} days/week)"
+                )
+            else:
+                conversions.append(
+                    f"Converted lead time {lt_val:g} {lt_unit}(s) -> {lt_conv:g} {base_unit}(s)"
+                )
             lt_val = lt_conv
         out["lead_time"] = lt_val
 
     if lt_std_val is not None:
         if base_unit != "period" and lt_std_unit and lt_std_unit != base_unit:
-            lt_std_conv = _convert_time_length(lt_std_val, lt_std_unit, base_unit, working_days)
-            conversions.append(
-                f"Converted lead time std {lt_std_val:g} {lt_std_unit}(s) -> {lt_std_conv:g} {base_unit}(s)"
-            )
+            lt_std_conv = _convert_time_length(lt_std_val, lt_std_unit, base_unit, working_days, days_per_week)
+            if {lt_std_unit, base_unit} == {"day", "week"}:
+                used_day_week_conversion = True
+                conversions.append(
+                    f"Converted lead time std {lt_std_val:g} {lt_std_unit}(s) -> {lt_std_conv:g} {base_unit}(s) "
+                    f"(using {days_per_week:g} days/week)"
+                )
+            else:
+                conversions.append(
+                    f"Converted lead time std {lt_std_val:g} {lt_std_unit}(s) -> {lt_std_conv:g} {base_unit}(s)"
+                )
             lt_std_val = lt_std_conv
         out["lead_time_std"] = lt_std_val
 
     if d_mean is not None:
         if base_unit != "period" and d_mean_unit and d_mean_unit != base_unit:
-            d_mean_conv = _convert_demand_rate(d_mean, d_mean_unit, base_unit, working_days)
-            conversions.append(
-                f"Converted demand mean {d_mean:g}/{d_mean_unit} -> {d_mean_conv:g}/{base_unit}"
-            )
+            d_mean_conv = _convert_demand_rate(d_mean, d_mean_unit, base_unit, working_days, days_per_week)
+            if {d_mean_unit, base_unit} == {"day", "week"}:
+                used_day_week_conversion = True
+                conversions.append(
+                    f"Converted demand mean {d_mean:g}/{d_mean_unit} -> {d_mean_conv:g}/{base_unit} "
+                    f"(using {days_per_week:g} days/week)"
+                )
+            else:
+                conversions.append(
+                    f"Converted demand mean {d_mean:g}/{d_mean_unit} -> {d_mean_conv:g}/{base_unit}"
+                )
             d_mean = d_mean_conv
         out["demand_mean"] = d_mean
 
     if d_std is not None:
         if base_unit != "period" and d_std_unit and d_std_unit != base_unit:
-            d_std_conv = _convert_demand_std(d_std, d_std_unit, base_unit, working_days)
-            conversions.append(
-                f"Converted demand std {d_std:g}/{d_std_unit} -> {d_std_conv:g}/{base_unit}"
-            )
+            d_std_conv = _convert_demand_std(d_std, d_std_unit, base_unit, working_days, days_per_week)
+            if {d_std_unit, base_unit} == {"day", "week"}:
+                used_day_week_conversion = True
+                conversions.append(
+                    f"Converted demand std {d_std:g}/{d_std_unit} -> {d_std_conv:g}/{base_unit} "
+                    f"(scaled by sqrt({days_per_week:g}) days/week)"
+                )
+            else:
+                conversions.append(
+                    f"Converted demand std {d_std:g}/{d_std_unit} -> {d_std_conv:g}/{base_unit}"
+                )
             d_std = d_std_conv
         out["demand_std"] = d_std
+
+    if used_day_week_conversion and assumptions is not None:
+        if explicit_days_per_week:
+            assumptions.append(
+                f"Daily-to-weekly unit conversion uses the specified {days_per_week:g} operating days per week."
+            )
+        else:
+            assumptions.append(
+                "Daily-to-weekly unit conversion assumes 7 calendar days per week "
+                "(unless a different operating-day convention is supplied)."
+            )
 
     out["time_unit"] = base_unit
     return out
@@ -1166,7 +1245,7 @@ def extract_inputs_rule_based(question: str, model_id: str) -> InputExtraction:
             missing.append("holding_rate (or holding_cost)")
 
     elif model_id == "safety_stock_rop":
-        params = _extract_demand_and_lead_time_stats(question, conversions, raw_matches)
+        params = _extract_demand_and_lead_time_stats(question, conversions, raw_matches, assumptions)
         _extract_service_level_and_z(question, params, raw_matches)
         _apply_explicit_constant_flags(question, params, raw_matches)
 
@@ -1194,10 +1273,11 @@ def extract_inputs_rule_based(question: str, model_id: str) -> InputExtraction:
             missing.append("service_level (or z_score)")
 
     elif model_id == "fixed_period_review":
-        params = _extract_demand_and_lead_time_stats(question, conversions, raw_matches)
+        params = _extract_demand_and_lead_time_stats(question, conversions, raw_matches, assumptions)
         _extract_service_level_and_z(question, params, raw_matches)
         _apply_explicit_constant_flags(question, params, raw_matches)
         working_days = _extract_working_days(question)
+        days_per_week, explicit_days_per_week = _extract_days_per_week(question)
 
         rev_m = (
             re.search(
@@ -1228,10 +1308,25 @@ def extract_inputs_rule_based(question: str, model_id: str) -> InputExtraction:
                 base_unit = rev_unit
                 params["time_unit"] = base_unit
             elif base_unit != "period" and rev_unit != "period" and rev_unit != base_unit:
-                conv_rev = _convert_time_length(rev_val, rev_unit, base_unit, working_days)
-                conversions.append(
-                    f"Converted review period {rev_val:g} {rev_unit}(s) -> {conv_rev:g} {base_unit}(s)"
-                )
+                conv_rev = _convert_time_length(rev_val, rev_unit, base_unit, working_days, days_per_week)
+                if {rev_unit, base_unit} == {"day", "week"}:
+                    conversions.append(
+                        f"Converted review period {rev_val:g} {rev_unit}(s) -> {conv_rev:g} {base_unit}(s) "
+                        f"(using {days_per_week:g} days/week)"
+                    )
+                    if explicit_days_per_week:
+                        assumptions.append(
+                            f"Daily-to-weekly unit conversion uses the specified {days_per_week:g} operating days per week."
+                        )
+                    else:
+                        assumptions.append(
+                            "Daily-to-weekly unit conversion assumes 7 calendar days per week "
+                            "(unless a different operating-day convention is supplied)."
+                        )
+                else:
+                    conversions.append(
+                        f"Converted review period {rev_val:g} {rev_unit}(s) -> {conv_rev:g} {base_unit}(s)"
+                    )
                 rev_val = conv_rev
             params["review_period"] = rev_val
             raw_matches["review_period"] = rev_m.group(0).strip()

@@ -1472,6 +1472,91 @@ class TestStreamlitCsvIntegration(unittest.TestCase):
         for i, stage in enumerate(stages, start=1):
             self.assertTrue(stage.startswith(f"{i}. "), f"Expected numbered stage {i}, got {stage!r}")
 
+    def test_daily_to_weekly_conversion_uses_exact_7_days_and_sqrt_scaling(self) -> None:
+        from inventory_tools import calculate_rop, normal_ppf
+
+        agent = InventoryDecisionAgent(parser_mode="rule")
+
+        # 1. Exact BAN 517 Test 7 question
+        q_test7 = (
+            "A product has average demand of 40 units per day with a standard deviation of "
+            "8 units per day. Average lead time is 3 weeks with a standard deviation of 0.5 weeks. "
+            "Determine the safety stock and reorder point for a 95% service level."
+        )
+        resp = agent.run(q_test7)
+        self.assertEqual(resp.status, "completed")
+        self.assertEqual(resp.identification.model_id, "safety_stock_rop")
+        self.assertTrue(resp.verification.passed)
+
+        # Daily -> weekly conversions: exact 7 calendar days/week and sqrt(7) scaling for std dev
+        self.assertAlmostEqual(resp.extraction.params["demand_mean"], 280.0, places=10)
+        self.assertAlmostEqual(resp.extraction.params["demand_std"], 8.0 * math.sqrt(7.0), places=10)
+        self.assertAlmostEqual(resp.extraction.params["lead_time"], 3.0, places=10)
+        self.assertAlmostEqual(resp.extraction.params["lead_time_std"], 0.5, places=10)
+        self.assertEqual(resp.extraction.params["time_unit"], "week")
+
+        # Exact numerical verification
+        expected_mu_lt = 280.0 * 3.0  # 840.0
+        expected_var_lt = 3.0 * (8.0 ** 2 * 7.0) + (280.0 ** 2) * (0.5 ** 2)  # 20,944.0
+        expected_sigma_lt = math.sqrt(expected_var_lt)
+        expected_z = normal_ppf(0.95)
+        expected_ss = expected_z * expected_sigma_lt
+        expected_rop = expected_mu_lt + expected_ss
+
+        calc = resp.calculation
+        self.assertAlmostEqual(calc["expected_lead_time_demand"], expected_mu_lt, places=10)
+        self.assertAlmostEqual(calc["lead_time_demand_variance"], expected_var_lt, places=10)
+        self.assertAlmostEqual(calc["lead_time_demand_std"], expected_sigma_lt, places=10)
+        self.assertAlmostEqual(calc["safety_stock"], expected_ss, places=10)
+        self.assertAlmostEqual(calc["reorder_point"], expected_rop, places=10)
+
+        # Dimensional invariance check: daily-basis calculation (L=21 days, sigma_L=3.5 days) must match identically
+        daily_equiv = calculate_rop(
+            demand_mean=40.0,
+            demand_std=8.0,
+            lead_time=21.0,
+            lead_time_std=3.5,
+            service_level=0.95,
+            time_unit="day",
+        )
+        self.assertAlmostEqual(calc["safety_stock"], daily_equiv["safety_stock"], places=10)
+        self.assertAlmostEqual(calc["reorder_point"], daily_equiv["reorder_point"], places=10)
+
+        # Assumption & practical whole-unit operational recommendation checks
+        self.assertTrue(
+            any("7 calendar days per week" in a for a in resp.extraction.assumptions),
+            f"Expected 7-calendar-day assumption, got {resp.extraction.assumptions}",
+        )
+        self.assertIn("7 calendar days per week", resp.explanation)
+        self.assertIn("**238.04 units**", resp.explanation)
+        self.assertIn("**1,078.04 units**", resp.explanation)
+        self.assertIn("**239 units**", resp.explanation)
+        self.assertIn("**1,079 units**", resp.explanation)
+
+        # 2. General daily-to-weekly scenario (non-hardcoded check)
+        q_general = (
+            "Daily demand averages 25 units per day with a standard deviation of 6 units per day. "
+            "Lead time averages 2 weeks with a standard deviation of 0.4 weeks. "
+            "Target cycle service level is 95%."
+        )
+        resp_gen = agent.run(q_general)
+        self.assertEqual(resp_gen.status, "completed")
+        self.assertAlmostEqual(resp_gen.extraction.params["demand_mean"], 175.0, places=10)
+        self.assertAlmostEqual(resp_gen.extraction.params["demand_std"], 6.0 * math.sqrt(7.0), places=10)
+        self.assertAlmostEqual(resp_gen.calculation["expected_lead_time_demand"], 350.0, places=10)
+
+        # 3. Explicit operating-day convention (5 business days per week) overrides 7-day default
+        q_5day = (
+            "Operating 5 business days per week, average demand is 40 units per day with a standard "
+            "deviation of 8 units per day. Average lead time is 3 weeks with a standard deviation of "
+            "0.5 weeks. Determine safety stock and reorder point for a 95% service level."
+        )
+        resp_5day = agent.run(q_5day)
+        self.assertEqual(resp_5day.status, "completed")
+        self.assertAlmostEqual(resp_5day.extraction.params["demand_mean"], 200.0, places=10)
+        self.assertAlmostEqual(resp_5day.extraction.params["demand_std"], 8.0 * math.sqrt(5.0), places=10)
+        self.assertTrue(any("5 operating days per week" in a for a in resp_5day.extraction.assumptions))
+
 
 if __name__ == "__main__":
     unittest.main()
